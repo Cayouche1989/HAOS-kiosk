@@ -33,9 +33,8 @@ Alternatively, you can right click (or long press touchscreen) to access
 browser menu that includes options for page `Back`, `Forward`, `Stop`, and
 `Reload`.
 
-**NOTE:** HA username and password are optional.
-If they are omitted, the add-on still starts, but automatic login on HA auth
-pages is disabled.
+**NOTE:** You must enter your HA username and password in the
+*Configuration* tab for the Add-on to start.
 
 **NOTE:** The Add-on requires a valid, connected display in order to
 start.\
@@ -81,8 +80,8 @@ ______________________________________________________________________
 2. Click on the Add-on, press **Install** and wait until the Add-on is
    installed.
 
-3. Optionally enter your HA username and password in the **Configuration**
-   tab if you want the add-on to auto-submit the HA login form.
+3. You must enter your HA username and password in the **Configuration**
+   tab.
 
 4. Press **Start** to run the Add-on.
 
@@ -104,11 +103,11 @@ ______________________________________________________________________
 
 ## Configuration Options
 
-### HA Username [optional]
+### HA Username [required]
 
 Enter your Home Assistant login name.
 
-### HA Password [optional]
+### HA Password [required]
 
 Enter your Home Assistant password.
 
@@ -136,9 +135,9 @@ Level of zoom with `100` being 100%.\
 ### Browser Refresh
 
 Time between browser refreshes. Set to `0` to disable.\
-For the Chromium runtime the recommended default is `0`, so the display path
-does not reload itself unless you explicitly need periodic recovery.\
-(Default: 0 seconds)
+Recommended because with the default RPi config, console errors *may*
+overwrite the dashboard.\
+(Default: 600 seconds)
 
 ### Screen Timeout
 
@@ -261,15 +260,6 @@ Port used for the REST API. Must be between 1024 and 49151. (Default: 8080)
 
 Note for security REST server only listens on localhost (127.0.0.1)
 
-### Ingress Runtime Port
-
-Port used by Home Assistant ingress when opening the add-on Web UI.
-(Default: 8099)
-
-This is an advanced recovery knob intended for port-drift troubleshooting.
-In normal setups it should remain aligned with add-on metadata
-`ingress_port`.
-
 ### REST Bearer Token
 
 Optional authorization token for REST API. (Default: "") If set, then you
@@ -338,7 +328,7 @@ ______________________________________________________________________
 ### launch_url {"url": "\<url>"}
 
 Launch the specified 'url' in the kiosk display. Overwrites current active
-tab. If no url supplied, use the resolved default target URL (`HA_TARGET_URL`).
+tab. If no url supplied, use HA_URL/HA_DASHBOARD as default url.
 
 Usage:
 
@@ -854,7 +844,7 @@ Examples:
 - **kiosk.forward**: Go forward in browser history
 - **kiosk.refresh_browser**: Reload current page
 - **kiosk.launch_url <url>**: Launch <url> in existing tab/window.\
-  If no <url> given, use the resolved default target URL (`HA_TARGET_URL`)
+  If no <url> given, use HA_URL/HA_DASHBOARD as default
 - **kiosk.display_on <timeout>**: Turn on display with optional timeout
 - **kiosk.display_off**: Turn off display immediately
 - **kiosk.toggle_keyboard**: Toggle onscreen keyboard
@@ -913,10 +903,11 @@ clicking on the `X` next to them):
 "3_TOUCH_1_SWIPE_RIGHT": {"cmds": "kiosk.back", "msg": "Go back in the history browser"}
 ```
 
-- **2-Finger Triple Tap**: *Restore the configured default target URL*
+- **2-Finger Triple Tap**: *Restore Default HA dashboard
+  (HA_URL/HA_Dashboard)*
 
 ```
-"2_TOUCH_3_TAP": {"cmds": "kiosk.launch_url", "msg": "Restore configured default target URL"}
+"2_TOUCH_3_TAP": {"cmds": "kiosk.launch_url", "msg": "Restore default dashboard: HA_URL/HA_DASHBOARD"}
 ```
 
 - **2-Finger Quadruple Tap**: *Open Google search*

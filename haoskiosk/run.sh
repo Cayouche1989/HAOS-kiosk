@@ -3,7 +3,7 @@
 ################################################################################
 # Add-on: HAOS Kiosk Display (haoskiosk)
 # File: run.sh
-# Version: 1.3.0
+# Version: 1.3.1-welizard.8
 # Copyright Jeff Kosowsky
 # Date: February 2026
 #
@@ -16,7 +16,6 @@
 #         LOGIN_DELAY
 #         ZOOM_LEVEL
 #         BROWSER_REFRESH
-#         BROWSER_ENGINE
 #         SCREEN_TIMEOUT
 #         OUTPUT_NUMBER
 #         DARK_MODE
@@ -35,6 +34,7 @@
 #         REST_IP
 #         REST_BEARER_TOKEN
 #         COMMAND_WHITELIST
+#         TOUCH_DEBUG_LEVEL
 #         VNC_SERVER
 #         DEBUG_MODE
 #
@@ -65,18 +65,8 @@ bashio::log.info "$(uname -a)"
 ha_info=$(bashio::info)
 bashio::log.info "Core=$(echo "$ha_info" | jq -r '.homeassistant')  HAOS=$(echo "$ha_info" | jq -r '.hassos')  MACHINE=$(echo "$ha_info" | jq -r '.machine')  ARCH=$(echo "$ha_info" | jq -r '.arch')"
 
-################################################################################
-#### Sync bundled scene-runtime to /config/kiosk-scene/scene-runtime/
-if [ -d /opt/scene-runtime ]; then
-    SCENE_TARGET="/config/kiosk-scene/scene-runtime"
-    mkdir -p "$SCENE_TARGET"
-    cp -r /opt/scene-runtime/* "$SCENE_TARGET/"
-    bashio::log.info "Synced scene-runtime to $SCENE_TARGET"
-fi
-
 #### Clean up on exit:
 TTY0_DELETED=""  #Need to set to empty string since runs with nounset=on (like set -u)
-TTY0_MODE=""
 ONBOARD_CONFIG_FILE="/config/onboard-settings.dconf"
 cleanup() {
     local exit_code=$?
@@ -92,9 +82,14 @@ cleanup() {
 trap cleanup HUP INT QUIT ABRT TERM EXIT
 
 ################################################################################
-#### Variables — set based on browser engine (configured below)
+#### Variables
 BROWSER=""
-BROWSER_FLAGS=""
+declare -a BROWSER_FLAGS=()
+BROWSER_PROCESS_MATCH=""
+CHROMIUM_DEVTOOLS_PORT="${CHROMIUM_DEVTOOLS_PORT:-9222}"
+CHROMIUM_PROFILE_DIR="${CHROMIUM_PROFILE_DIR:-/config/chromium-profile}"
+CHROMIUM_GL_MODE="${CHROMIUM_GL_MODE:-angle}"
+CHROMIUM_ANGLE_BACKEND="${CHROMIUM_ANGLE_BACKEND:-default}"
 
 ################################################################################
 #### Get config variables from HA add-on & set environment variables
@@ -132,15 +127,16 @@ load_config_var() {
     fi
 }
 
-load_config_var HA_USERNAME ""
+load_config_var HA_USERNAME
 load_config_var HA_PASSWORD "" 1  #Mask password in log
 load_config_var HA_URL "http://localhost:8123"
+load_config_var HA_LOGIN_URL "http://127.0.0.1:8123"
 load_config_var HA_DASHBOARD ""
 load_config_var LOGIN_DELAY 1.0
 load_config_var ZOOM_LEVEL 100
-load_config_var BROWSER_REFRESH 0
+load_config_var BROWSER_REFRESH 600
 load_config_var BROWSER_ENGINE "chromium"
-load_config_var SCREEN_TIMEOUT 0
+load_config_var SCREEN_TIMEOUT 600  # Default to 600 seconds
 load_config_var OUTPUT_NUMBER 1  # Which *CONNECTED* Physical video output to use (Defaults to 1)
 #NOTE: By only considering *CONNECTED* output, this maximizes the chance of finding an output
 #      without any need to change configs. Set to 1, unless you have multiple video outputs connected.
@@ -151,7 +147,7 @@ load_config_var ROTATE_DISPLAY normal
 load_config_var MAP_TOUCH_INPUTS true
 load_config_var CURSOR_TIMEOUT 5  # Default to 5 seconds
 load_config_var KEYBOARD_LAYOUT us
-load_config_var ONSCREEN_KEYBOARD true
+load_config_var ONSCREEN_KEYBOARD false
 load_config_var SAVE_ONSCREEN_CONFIG true
 load_config_var XORG_CONF ""
 load_config_var XORG_APPEND_REPLACE append
@@ -160,44 +156,162 @@ load_config_var REST_PORT 8080
 load_config_var REST_IP "127.0.0.1"
 load_config_var REST_BEARER_TOKEN "" 1  # Mask token in log
 load_config_var COMMAND_WHITELIST "^$"  # Default is no commands allowed
+load_config_var TOUCH_DEBUG_LEVEL 1
 load_config_var DEBUG_MODE false
 load_config_var VNC_SERVER ""  1 #Mask password in log
 
-################################################################################
-#### Configure browser engine
-case "$BROWSER_ENGINE" in
-    chromium)
-        if command -v chromium-browser >/dev/null 2>&1; then
-            BROWSER="chromium-browser"
-        else
-            BROWSER="chromium"
-        fi
-        # Core flags: GPU rendering via ANGLE (default backend).
-        # Debian Chromium only allows egl-angle/default — native EGL is blocked.
-        # Mesa 25.0 (bookworm-backports) provides iris+Vulkan for Intel N150 (0x46d4),
-        # so ANGLE will use hardware Vulkan via mesa-vulkan-drivers.
-        # --enable-unsafe-swiftshader ensures SwANGLE fallback if hardware Vulkan fails.
-        BROWSER_FLAGS="--no-sandbox --no-first-run --no-default-browser-check --disable-session-crashed-bubble --disable-infobars --password-store=basic --remote-debugging-address=127.0.0.1 --remote-debugging-port=9222 --remote-allow-origins=* --user-data-dir=/config/chromium-profile --window-position=0,0 --start-fullscreen --kiosk --ozone-platform=x11 --touch-events=enabled --enable-gpu-rasterization --ignore-gpu-blocklist --enable-unsafe-swiftshader"
+# Validate environment variables set by config.yaml
+if [ -z "$HA_USERNAME" ] || [ -z "$HA_PASSWORD" ]; then
+    bashio::log.error "Error: HA_USERNAME and HA_PASSWORD must be set"
+    exit 1
+fi
 
-        bashio::log.info "Using browser engine: chromium [$BROWSER]"
-        bashio::log.info "Chromium version: $($BROWSER --version 2>/dev/null || echo 'unknown')"
-        bashio::log.info "Chromium flags: $BROWSER_FLAGS"
+case "${BROWSER_ENGINE,,}" in
+    chromium|chrome)
+        BROWSER_ENGINE="chromium"
         ;;
     luakit)
-        BROWSER="luakit"
-        BROWSER_FLAGS=""
-        bashio::log.info "Using browser engine: luakit [$BROWSER]"
-        # Validate credentials required for luakit (URL-based auth)
-        if [ -z "$HA_USERNAME" ] || [ -z "$HA_PASSWORD" ]; then
-            bashio::log.error "Error: HA_USERNAME and HA_PASSWORD must be set for luakit"
-            exit 1
-        fi
+        BROWSER_ENGINE="luakit"
         ;;
     *)
-        bashio::log.error "Unknown browser engine: $BROWSER_ENGINE"
+        bashio::log.error "Unsupported BROWSER_ENGINE='$BROWSER_ENGINE' (expected chromium or luakit)"
         exit 1
         ;;
 esac
+
+export BROWSER_ENGINE
+export CHROMIUM_DEVTOOLS_PORT
+export CHROMIUM_PROFILE_DIR
+export CHROMIUM_GL_MODE
+export CHROMIUM_ANGLE_BACKEND
+
+resolve_browser_binary() {
+    case "$BROWSER_ENGINE" in
+        chromium)
+            if command -v chromium-browser >/dev/null 2>&1; then
+                BROWSER="chromium-browser"
+            elif command -v chromium >/dev/null 2>&1; then
+                BROWSER="chromium"
+            else
+                bashio::log.error "Chromium requested but neither 'chromium-browser' nor 'chromium' found in container"
+                exit 1
+            fi
+            BROWSER_FLAGS=(
+                --no-sandbox
+                --no-first-run
+                --no-default-browser-check
+                --disable-session-crashed-bubble
+                --disable-infobars
+                --disable-features=Translate,TranslateUI,AutofillServerCommunication,PasswordManagerOnboarding,PasswordCheck,PasswordManagerRedesign,OptimizationGuideModelDownloading
+                --disable-save-password-bubble
+                --disable-sync
+                --disable-search-engine-choice-screen
+                --disable-application-cache
+                --aggressive-cache-discard
+                --password-store=basic
+                --remote-debugging-address=127.0.0.1
+                --remote-debugging-port="$CHROMIUM_DEVTOOLS_PORT"
+                --user-data-dir="$CHROMIUM_PROFILE_DIR"
+                --disk-cache-dir=/tmp/haoskiosk-cache
+                --disk-cache-size=1
+                --media-cache-size=1
+                --window-position=0,0
+                --start-fullscreen
+                --kiosk
+                --ozone-platform=x11
+                --touch-events=enabled
+                --enable-gpu-rasterization
+                --ignore-gpu-blocklist
+                --use-gl="$CHROMIUM_GL_MODE"
+                --use-angle="$CHROMIUM_ANGLE_BACKEND"
+            )
+            BROWSER_PROCESS_MATCH='chromium'
+            ;;
+        luakit)
+            BROWSER="luakit"
+            BROWSER_FLAGS=()
+            BROWSER_PROCESS_MATCH='luakit'
+            ;;
+    esac
+}
+
+browser_process_running() {
+    pgrep -f -- "$BROWSER_PROCESS_MATCH" > /dev/null 2>&1
+}
+
+clear_chromium_runtime_cache() {
+    [ "$BROWSER_ENGINE" = "chromium" ] || return 0
+
+    mkdir -p "$CHROMIUM_PROFILE_DIR"
+
+    local cache_paths=(
+        "$CHROMIUM_PROFILE_DIR/Cache"
+        "$CHROMIUM_PROFILE_DIR/Code Cache"
+        "$CHROMIUM_PROFILE_DIR/GPUCache"
+        "$CHROMIUM_PROFILE_DIR/DawnCache"
+        "$CHROMIUM_PROFILE_DIR/GrShaderCache"
+        "$CHROMIUM_PROFILE_DIR/ShaderCache"
+        "$CHROMIUM_PROFILE_DIR/Default/Cache"
+        "$CHROMIUM_PROFILE_DIR/Default/Code Cache"
+        "$CHROMIUM_PROFILE_DIR/Default/GPUCache"
+        "$CHROMIUM_PROFILE_DIR/Default/DawnCache"
+        "$CHROMIUM_PROFILE_DIR/Default/GrShaderCache"
+        "$CHROMIUM_PROFILE_DIR/Default/Service Worker"
+    )
+
+    local cache_path
+    for cache_path in "${cache_paths[@]}"; do
+        rm -rf "$cache_path"
+    done
+}
+
+seed_chromium_preferences() {
+    [ "$BROWSER_ENGINE" = "chromium" ] || return 0
+
+    local default_dir="$CHROMIUM_PROFILE_DIR/Default"
+    mkdir -p "$default_dir"
+
+    cat > "$default_dir/Preferences" <<'EOF'
+{
+  "autofill": {
+    "enabled": false
+  },
+  "browser": {
+    "check_default_browser": false,
+    "has_seen_welcome_page": true
+  },
+  "credentials_enable_service": false,
+  "distribution": {
+    "import_bookmarks": false,
+    "import_history": false,
+    "import_search_engine": false,
+    "make_chrome_default_for_user": false,
+    "skip_first_run_ui": true
+  },
+  "profile": {
+    "default_content_setting_values": {
+      "notifications": 2
+    },
+    "password_manager_enabled": false
+  },
+  "safebrowsing": {
+    "enabled": false
+  },
+  "sync_promo": {
+    "show_on_first_run_allowed": false
+  },
+  "translate": {
+    "enabled": false
+  }
+}
+EOF
+}
+
+resolve_browser_binary
+bashio::log.info "Using browser engine: $BROWSER_ENGINE [$BROWSER]"
+if [ "$BROWSER_ENGINE" = "chromium" ]; then
+    bashio::log.info "Chromium GL mode: use-gl=$CHROMIUM_GL_MODE use-angle=$CHROMIUM_ANGLE_BACKEND"
+fi
 
 ################################################################################
 ### GTK and DBUS-related environment variables to improve stability
@@ -227,37 +341,35 @@ echo "$DBUS_SESSION_BUS_ADDRESS" >| /tmp/DBUS_SESSION_BUS_ADDRESS
 # Make available to subsequent shells
 echo "export DBUS_SESSION_BUS_ADDRESS='$DBUS_SESSION_BUS_ADDRESS'" >> "$HOME/.profile"
 
-#### Handle /dev/tty0 for X server
-# Xorg requires /dev/tty0 for VT management. Two strategies:
-# 1. Alpine: devtmpfs is writable — delete /dev/tty0 (upstream approach)
-# 2. Debian: devtmpfs is read-only — use LD_PRELOAD to fake tty0 access
-XORG_PRELOAD=""
+#### Hack to get writable /dev/tty0 for X
+# Note first need to delete /dev/tty0 since X won't start if it is there,
+# because X doesn't have permissions to access it in the container
+# Also, prevents udev permission error warnings & issues
+# Note that remounting rw is not sufficient
+
+# First, remount /dev as read-write since X absolutely, must have /dev/tty access
+# Note: need to use the version of 'mount' in util-linux, not busybox
+# Note: Do *not* later remount as 'ro' since that affect the root fs and
+#       in particular will block HAOS updates
 if [ -e "/dev/tty0" ]; then
-    if mount -o remount,rw /dev 2>/dev/null && rm -f /dev/tty0; then
-        TTY0_DELETED=1
-        bashio::log.info "Deleted /dev/tty0 successfully (Alpine mode)..."
-    elif [ -f /usr/lib/tty0_override.so ]; then
-        XORG_PRELOAD="/usr/lib/tty0_override.so"
-        bashio::log.info "Using LD_PRELOAD to fake /dev/tty0 VT access (Debian mode)..."
-    else
-        bashio::log.warning "/dev/tty0 inaccessible and no override library, X may fail"
+    bashio::log.info "Attempting to remount /dev as 'rw' so we can (temporarily) delete /dev/tty0..."
+    mount -o remount,rw /dev
+    if ! mount -o remount,rw /dev ; then
+        bashio::log.error "Failed to remount /dev as read-write..."
+        exit 1
     fi
+    if  ! rm -f /dev/tty0 ; then
+        bashio::log.error "Failed to delete /dev/tty0..."
+        exit 1
+    fi
+    TTY0_DELETED=1
+    bashio::log.info "Deleted /dev/tty0 successfully..."
 fi
 
 #### Start udev (used by X)
 bashio::log.info "Starting 'udevd' and (re-)triggering..."
-if command -v udevd >/dev/null 2>&1; then
-    UDEVD_BIN="udevd"
-elif [ -x /lib/systemd/systemd-udevd ]; then
-    UDEVD_BIN="/lib/systemd/systemd-udevd"
-else
-    UDEVD_BIN=""
-    bashio::log.warning "udevd not found, input devices may not work"
-fi
-if [ -n "$UDEVD_BIN" ]; then
-    if ! $UDEVD_BIN --daemon || ! udevadm trigger; then
-        bashio::log.warning "WARNING: Failed to start udevd or trigger udev, input devices may not work"
-    fi
+if ! udevd --daemon || ! udevadm trigger; then
+    bashio::log.warning "WARNING: Failed to start udevd or trigger udev, input devices may not work"
 fi
 udevadm settle --timeout=10  #Wait for udev event processing to complete
 
@@ -365,55 +477,6 @@ else
     fi
 fi
 
-# If udev didn't tag input devices, add explicit InputDevice sections.
-# Without udev tags, Xorg cannot auto-detect input devices via libinput.
-# Check if udev actually tagged any input device (ID_INPUT property).
-UDEV_FUNCTIONAL=false
-for _dev in /dev/input/event*; do
-    if [ -c "$_dev" ] && udevadm info --query=property --name="$_dev" 2>/dev/null | grep -q "^ID_INPUT="; then
-        UDEV_FUNCTIONAL=true
-        break
-    fi
-done
-if [ "$UDEV_FUNCTIONAL" = false ]; then
-    bashio::log.info "udev not functional — adding explicit input devices to xorg.conf"
-    idx=0
-    input_sections=""
-    layout_refs=""
-    for dev in /dev/input/event*; do
-        [ -c "$dev" ] || continue
-        devname=$(basename "$dev")
-        input_sections="${input_sections}
-Section \"InputDevice\"
-    Identifier \"evdev-${devname}\"
-    Driver \"evdev\"
-    Option \"Device\" \"${dev}\"
-EndSection
-"
-        layout_refs="${layout_refs}    InputDevice \"evdev-${devname}\" \"SendCoreEvents\"\n"
-        idx=$((idx + 1))
-    done
-
-    # Add ServerFlags to disable udev-based auto-detection
-    {
-        echo ""
-        echo "# Auto-generated: udev unavailable, using explicit input devices"
-        echo "Section \"ServerFlags\""
-        echo "    Option \"AutoAddDevices\" \"false\""
-        echo "    Option \"AutoEnableDevices\" \"true\""
-        echo "EndSection"
-        echo "$input_sections"
-    } >> /etc/X11/xorg.conf
-
-    # Insert InputDevice references into ServerLayout (before first EndSection)
-    awk -v refs="$layout_refs" '
-        /^EndSection/ && !done { printf "%s", refs; done=1 }
-        { print }
-    ' /etc/X11/xorg.conf > /tmp/xorg.conf.tmp && mv /tmp/xorg.conf.tmp /etc/X11/xorg.conf
-
-    bashio::log.info "Added $idx input device(s) to xorg.conf"
-fi
-
 # Print out current 'xorg.conf'
 echo "."  #Almost blank line (Note totally blank or white space lines are swallowed)
 printf '%*s xorg.conf %*s\n' 35 '' 34 '' | tr ' ' '#'  #Header
@@ -424,11 +487,7 @@ echo "."
 bashio::log.info "Starting X on DISPLAY=$DISPLAY..."
 NOCURSOR=""
 [ "$CURSOR_TIMEOUT" -lt 0 ] && NOCURSOR="-nocursor"  #No cursor if <0
-if [ -n "$XORG_PRELOAD" ]; then
-    LD_PRELOAD="$XORG_PRELOAD" Xorg $NOCURSOR :0 </dev/null 2>&1 | grep -v "Could not resolve keysym XF86\|Errors from xkbcomp are not fatal\|XKEYBOARD keymap compiler (xkbcomp) reports" &
-else
-    Xorg $NOCURSOR :0 </dev/null 2>&1 | grep -v "Could not resolve keysym XF86\|Errors from xkbcomp are not fatal\|XKEYBOARD keymap compiler (xkbcomp) reports" &
-fi
+Xorg $NOCURSOR </dev/null 2>&1 | grep -v "Could not resolve keysym XF86\|Errors from xkbcomp are not fatal\|XKEYBOARD keymap compiler (xkbcomp) reports" &
 
 XSTARTUP=30
 for ((i=0; i<=XSTARTUP; i++)); do
@@ -521,6 +580,10 @@ rm /tmp/new_keybinds.xml
 
 # Start openbox
 openbox &
+
+#WINMGR=xfwm4  #Alternately using xfwm4
+#xfsettingsd &
+#startxfce4 &
 
 O_PID=$!
 sleep 0.5  #Ensure window manager starts
@@ -651,7 +714,7 @@ if [[ "$ONSCREEN_KEYBOARD" = true && -n "$SCREEN_WIDTH" && -n "$SCREEN_HEIGHT" ]
     dconf write /org/onboard/auto-show/enabled true  # Auto-show
     dconf write /org/onboard/auto-show/tablet-mode-detection-enabled false  # Show keyboard only in tablet mode
     dconf write /org/onboard/window/force-to-top true  # Always on top
-    gsettings set org.gnome.desktop.interface toolkit-accessibility true 2>/dev/null || true  # Disable gnome accessibility popup (gsettings may not be available)
+    gsettings set org.gnome.desktop.interface toolkit-accessibility true  # Disable gnome accessibility popup
 
     # Default landscape geometry
     dconf write /org/onboard/window/landscape/height "$LAND_HEIGHT"
@@ -666,14 +729,7 @@ if [[ "$ONSCREEN_KEYBOARD" = true && -n "$SCREEN_WIDTH" && -n "$SCREEN_HEIGHT" ]
     dconf write /org/onboard/window/portrait/y "$PORT_Y_OFFSET"
 
     ### Restore or delete saved  user configuration
-    if [ -f "$ONBOARD_CONFIG_FILE" ]; then
-        if [ "$SAVE_ONSCREEN_CONFIG" = true ]; then
-            bashio::log.info "Restoring Onboard configuration from '$ONBOARD_CONFIG_FILE'"
-            dconf load /org/onboard/ < "$ONBOARD_CONFIG_FILE"
-        else  #Otherwise delete config file (if it exists)
-            rm -f "$ONBOARD_CONFIG_FILE"
-        fi
-    fi
+    rm -f "$ONBOARD_CONFIG_FILE"
 
     LOG_MSG=$(
         echo "Onboard keyboard initialized for: $OUTPUT_NAME (${SCREEN_WIDTH}x${SCREEN_HEIGHT}) [$ORIENTATION]"
@@ -686,6 +742,7 @@ if [[ "$ONSCREEN_KEYBOARD" = true && -n "$SCREEN_WIDTH" && -n "$SCREEN_HEIGHT" ]
     ### Launch 'Onboard' keyboard
     bashio::log.info "Starting Onboard onscreen keyboard"
     onboard &
+    python3 /kiosk_overlay.py &
 fi
 
 ### Set Audio sink
@@ -722,7 +779,7 @@ pactl list short sinks | awk -v def="$sink" '{prefix = ($2 == def) ? "*" : " "; 
 
 ### Launch Xinput parsing...
 bashio::log.info "Starting Mouse & Touch input gesture command parsing..."
-python3 -u /mouse_touch_inputs.py  -d 1 -w "$COMMAND_WHITELIST" &
+python3 -u /mouse_touch_inputs.py -d "$TOUCH_DEBUG_LEVEL" -w "$COMMAND_WHITELIST" &
 
 #### Start  HAOSKiosk REST server
 bashio::log.info "Starting HAOSKiosk REST server..."
@@ -757,77 +814,27 @@ if [ -n "$VNC_SERVER" ]; then
     x11vnc $X11VNC_OPTS 2> >(grep -v 'The VNC desktop is:' >&2)
 fi
 
-#### Start browser (or debug mode) and wait/sleep
+#### Start browser (or debug mode)  and wait/sleep
 if [ "$DEBUG_MODE" != true ]; then
-
-    #### Display sleep monitor — pause/resume Chromium when DPMS turns display off/on
-    if [ "$BROWSER_ENGINE" = "chromium" ] && [ "$SCREEN_TIMEOUT" -gt 0 ]; then
-        (
-            prev_state="On"
-            while true; do
-                state=$(xset q 2>/dev/null | awk '/Monitor is/ {print $NF}')
-                [ -z "$state" ] && state="On"
-                if [ "$state" != "$prev_state" ]; then
-                    case "$state" in
-                        Off|Standby|Suspend)
-                            pkill -STOP -f "chromium.*--type=renderer" 2>/dev/null
-                            pkill -STOP -f "chromium.*--type=gpu-process" 2>/dev/null
-                            bashio::log.info "Display sleep: paused Chromium rendering"
-                            ;;
-                        *)
-                            pkill -CONT -f "chromium.*--type=renderer" 2>/dev/null
-                            pkill -CONT -f "chromium.*--type=gpu-process" 2>/dev/null
-                            bashio::log.info "Display wake: resumed Chromium rendering"
-                            ;;
-                    esac
-                    prev_state="$state"
-                fi
-                sleep 5
-            done
-        ) &
-        bashio::log.info "Display sleep monitor started (checks every 5s)"
-    fi
-
-    ### Resolve target URL: use HA_DASHBOARD directly if it's a full URL, otherwise append to HA_URL
-    if [[ "$HA_DASHBOARD" =~ ^https?:// ]]; then
-        TARGET_URL="$HA_DASHBOARD"
-    else
-        TARGET_URL="$HA_URL/$HA_DASHBOARD"
-    fi
-
-    ### For kiosk-scene URLs, force Live2D avatar adapter (override localhost static fallback)
-    ### Rewrite /scene/ to /scene-runtime/ to avoid nginx 302 that drops query params
-    if [[ "$TARGET_URL" == *"/scene/"* || "$TARGET_URL" == *"/scene-runtime/"* ]]; then
-        TARGET_URL=$(echo "$TARGET_URL" | sed 's|/scene/|/scene-runtime/|')
-        if [[ "$TARGET_URL" == *"?"* ]]; then
-            TARGET_URL="${TARGET_URL}&avatar=live2d"
-        else
-            TARGET_URL="${TARGET_URL}?avatar=live2d"
-        fi
-        bashio::log.info "Kiosk-scene detected, forcing Live2D avatar adapter"
-    fi
-
-    ### Clear GPU/shader caches to avoid stale state from previous GPU configs
-    rm -rf /config/chromium-profile/Default/GPUCache \
-           /config/chromium-profile/Default/ShaderCache \
-           /config/chromium-profile/Default/Cache 2>/dev/null
-    bashio::log.info "Cleared Chromium GPU/shader/page caches"
-
     ### Run browser in the background and wait for process to exit
-    $BROWSER ${BROWSER_FLAGS:+$BROWSER_FLAGS} "$TARGET_URL" &
-    BROWSER_PID=$!
-    bashio::log.info "Launching $BROWSER browser(PID=$BROWSER_PID): $TARGET_URL"
+    if [ "$BROWSER_ENGINE" = "chromium" ]; then
+        mkdir -p "$CHROMIUM_PROFILE_DIR"
+        rm -f "$CHROMIUM_PROFILE_DIR"/Singleton*
+        clear_chromium_runtime_cache
+        seed_chromium_preferences
+    fi
 
-    # Determine process search pattern: on Alpine, chromium-browser is a wrapper
-    # script that execs /usr/lib/chromium/chromium, so pgrep must match broadly
-    case "$BROWSER_ENGINE" in
-        chromium) BROWSER_PGREP="chromium" ;;
-        *)        BROWSER_PGREP="$BROWSER" ;;
-    esac
+    "$BROWSER" "${BROWSER_FLAGS[@]}" "$HA_URL/$HA_DASHBOARD" &
+    bashio::log.info "Launching $BROWSER browser(PID=$!): $HA_URL/$HA_DASHBOARD"
+
+    if [ "$BROWSER_ENGINE" = "chromium" ]; then
+        python3 -u /chromium_watchdog.py &
+        bashio::log.info "Launching Chromium watchdog(PID=$!) on DevTools port $CHROMIUM_DEVTOOLS_PORT"
+    fi
 
     count=0
     while true; do  # Wait for all browser processes to exit
-        if pgrep -f "$BROWSER_PGREP" > /dev/null 2>&1; then
+        if browser_process_running; then
             count=0
         else
             count=$((count + 1))
@@ -835,7 +842,7 @@ if [ "$DEBUG_MODE" != true ]; then
         [ $count -ge 3 ] && break # Exit if no browser process for at least 2*5=10 seconds
         sleep 5
     done
-    bashio::log.info "No $BROWSER_PGREP instances remaining... exiting 'run.sh'..."
+    bashio::log.info "No $BROWSER instances remaining... exiting 'run.sh'..."
 
 else  ### Debug mode
     bashio::log.info "Entering debug mode (X & $WINMGR window manager but no $BROWSER browser)..."

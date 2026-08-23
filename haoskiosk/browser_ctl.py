@@ -12,20 +12,49 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Awaitable, Callable
 from typing import Any
 
 from aiohttp import ClientSession, ClientTimeout, WSMsgType  # type: ignore[import-not-found]
-from target_url import normalize_url, resolve_default_launch_url
 
 
 BROWSER_ENGINE = (os.getenv("BROWSER_ENGINE") or "chromium").strip().lower()
 CHROMIUM_DEVTOOLS_PORT = int(os.getenv("CHROMIUM_DEVTOOLS_PORT", "9222"))
 CHROMIUM_DEVTOOLS_HOST = os.getenv("CHROMIUM_DEVTOOLS_HOST", "127.0.0.1")
-DEFAULT_LAUNCH_URL = resolve_default_launch_url()
+DEFAULT_LAUNCH_URL = (
+    f"{(os.getenv('HA_URL') or 'about:blank').rstrip('/')}/{os.getenv('HA_DASHBOARD') or ''}"
+).strip("/") or "about:blank"
 CLIENT_TIMEOUT = ClientTimeout(total=5)
+
+VALID_URL_REGEX = re.compile(
+    r"^(https?://)?"
+    r"(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,63}\.?|"
+    r"localhost|"
+    r"\d{1,3}(?:\.\d{1,3}){3})"
+    r"(?::\d{1,5})?"
+    r"(?:/?|[/?][^\s]*)?$",
+    re.IGNORECASE,
+)
+
+
+def is_valid_url(url: str) -> bool:
+    """Validate URL format (allows http://, https://, bare domain/IP, path, query, fragment)."""
+    return bool(url == "about:blank" or VALID_URL_REGEX.fullmatch(url.strip()))
+
+
+def normalize_url(url: str | None) -> str:
+    """Return a browser-safe URL."""
+    candidate = (url or DEFAULT_LAUNCH_URL or "about:blank").strip()
+    if not candidate:
+        candidate = DEFAULT_LAUNCH_URL or "about:blank"
+    if candidate != "about:blank" and not candidate.startswith(("http://", "https://")):
+        candidate = "http://" + candidate
+    if not is_valid_url(candidate):
+        raise ValueError(f"Invalid URL format: {candidate}")
+    return candidate
 
 
 def _run_luakit_command(args: list[str]) -> None:
