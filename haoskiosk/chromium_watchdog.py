@@ -9,6 +9,7 @@ import os
 import re
 import time
 from typing import Any
+from urllib.parse import urlparse
 
 from browser_ctl import ChromiumController
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 HA_LOGIN_URL = (os.getenv("HA_LOGIN_URL") or "http://127.0.0.1:8123").rstrip("/")
 _origin = re.match(r"^(https?://[\w.\-]+(?::\d+)?)", HA_LOGIN_URL)
 HA_LOGIN_URL_BASE = _origin.group(1).rstrip("/") if _origin else HA_LOGIN_URL
+DESKOS_URL = (os.getenv("DESKOS_URL") or "http://127.0.0.1:4173/").rstrip("/")
 HA_USERNAME = os.getenv("HA_USERNAME") or ""
 HA_PASSWORD = os.getenv("HA_PASSWORD") or ""
 BROWSER_REFRESH = max(0, int(os.getenv("BROWSER_REFRESH") or "600"))
@@ -88,6 +90,17 @@ def is_ha_page(url: str) -> bool:
     return bool(url and (url + "/").startswith(HA_LOGIN_URL_BASE + "/"))
 
 
+def is_deskos_page(url: str) -> bool:
+    """DeskOS owns its idle lifecycle, so it must not be periodically reloaded."""
+    current = urlparse(url)
+    deskos = urlparse(DESKOS_URL)
+    return (
+        current.scheme == deskos.scheme
+        and current.hostname == deskos.hostname
+        and current.port == deskos.port
+    )
+
+
 def extract_evaluate_value(result: dict[str, Any]) -> Any:
     runtime_result = result.get("result")
     return runtime_result.get("value") if isinstance(runtime_result, dict) and "value" in runtime_result else runtime_result
@@ -143,7 +156,13 @@ async def main() -> None:
                     last_reload_at = time.monotonic()
                     logger.info("Reloaded page to apply updated HA localStorage")
                 last_settings_url = url
-            if BROWSER_REFRESH > 0 and url and url != "about:blank" and time.monotonic() - last_reload_at >= BROWSER_REFRESH:
+            if (
+                BROWSER_REFRESH > 0
+                and url
+                and url != "about:blank"
+                and not is_deskos_page(url)
+                and time.monotonic() - last_reload_at >= BROWSER_REFRESH
+            ):
                 reload_count += 1
                 await controller.reload(ignore_cache=reload_count % HARD_RELOAD_FREQ == 0)
                 last_reload_at = time.monotonic()
