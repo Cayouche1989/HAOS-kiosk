@@ -43,11 +43,12 @@ class Overlay(Gtk.Window):
     def __init__(self) -> None:
         super().__init__(type=Gtk.WindowType.POPUP)
         self.set_decorated(False)
-        self.set_override_redirect(True)
         self.set_keep_above(True)
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
         self.set_accept_focus(False)
+        self.connect("realize", self._on_realize)
+        self.connect("map-event", self._on_map)
         self.set_size_request(326, 64)
         self.move(10, 10)
         box = Gtk.Box(spacing=6, margin=6)
@@ -57,6 +58,28 @@ class Overlay(Gtk.Window):
             button.set_size_request(154, 52)
             button.connect("clicked", action)
             box.pack_start(button, True, True, 0)
+        print("[overlay] overlay created", flush=True)
+
+    def _on_realize(self, *_: object) -> None:
+        """Apply the X11 override flag only after Gtk has created Gdk.Window."""
+        print("[overlay] overlay realized", flush=True)
+        gdk_window = self.get_window()
+        if gdk_window is None:
+            print("[overlay] Gdk.Window unavailable", flush=True)
+            return
+
+        print("[overlay] Gdk.Window acquired", flush=True)
+        try:
+            gdk_window.set_override_redirect(True)
+        except (AttributeError, TypeError) as err:
+            print(f"[overlay] override_redirect unavailable: {err}", flush=True)
+        else:
+            print("[overlay] override_redirect applied", flush=True)
+
+    def _on_map(self, *_: object) -> bool:
+        print("[overlay] overlay mapped", flush=True)
+        print("[overlay] overlay visible", flush=True)
+        return False
 
     def deskos(self, *_: object) -> None:
         subprocess.Popen(
