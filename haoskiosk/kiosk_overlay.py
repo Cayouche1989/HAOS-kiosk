@@ -1,17 +1,24 @@
 #!/usr/bin/env python3
-"""Small, always-available X11 escape overlay for the touchscreen kiosk."""
+"""X11 escape overlay, displayed only while Chromium is outside DeskOS."""
 
+import asyncio
 import os
 import subprocess
+import threading
+from urllib.parse import urlparse
 
 import gi
 
 gi.require_version("Gtk", "3.0")
-from gi.repository import Gtk
+from gi.repository import GLib, Gtk
+
+from browser_ctl import ChromiumController
 
 ONBOARD_DESTINATION = "org.onboard.Onboard"
 ONBOARD_PATH = "/org/onboard/Onboard/Keyboard"
 ONBOARD_INTERFACE = "org.onboard.Onboard.Keyboard"
+DESKOS_URL = os.getenv("DESKOS_URL", "http://127.0.0.1:4173/")
+URL_POLL_SECONDS = 0.75
 
 
 def onboard_visible() -> bool:
@@ -47,6 +54,7 @@ class Overlay(Gtk.Window):
         self.set_skip_taskbar_hint(True)
         self.set_skip_pager_hint(True)
         self.set_accept_focus(False)
+        self._visible_for_page = None
         self.connect("realize", self._on_realize)
         self.connect("map-event", self._on_map)
         self.set_size_request(326, 64)
@@ -59,6 +67,32 @@ class Overlay(Gtk.Window):
             button.connect("clicked", action)
             box.pack_start(button, True, True, 0)
         print("[overlay] overlay created", flush=True)
+
+    @staticmethod
+    def _is_deskos_url(url: str) -> bool:
+        """Return true only for the configured DeskOS origin."""
+        current = urlparse(url)
+        deskos = urlparse(DESKOS_URL)
+        return (
+            current.scheme == deskos.scheme
+            and current.hostname == deskos.hostname
+            and current.port == deskos.port
+        )
+
+    def update_page_visibility(self, url: str) -> bool:
+        """Run in the GTK thread; keep the existing popup instance alive."""
+        should_show = not self._is_deskos_url(url)
+        if should_show == self._visible_for_page:
+            return False
+
+        self._visible_for_page = should_show
+        if should_show:
+            self.show_all()
+            print("[overlay] visible for non-DeskOS page", flush=True)
+        else:
+            self.hide()
+            print("[overlay] hidden for DeskOS", flush=True)
+        return False
 
     def _on_realize(self, *_: object) -> None:
         """Apply the X11 override flag only after Gtk has created Gdk.Window."""
@@ -82,6 +116,8 @@ class Overlay(Gtk.Window):
         return False
 
     def deskos(self, *_: object) -> None:
+        # Hide immediately: CDP will confirm the DeskOS URL shortly afterwards.
+        self.update_page_visibility(DESKOS_URL)
         subprocess.Popen(
             ["python3", "/browser_ctl.py", "launch_url", os.getenv("DESKOS_URL", "http://127.0.0.1:4173/")],
             stdout=subprocess.DEVNULL,
@@ -92,6 +128,30 @@ class Overlay(Gtk.Window):
         set_onboard_visible(onboard_visible())
 
 
+def monitor_page_visibility(window: Overlay) -> None:
+    """Use Chromium CDP as the source of truth without recreating the popup."""
+    last_url = None
+    last_error = None
+    while True:
+        try:
+            target = asyncio.run(ChromiumController().get_page_target())
+            url = str(target.get("url") or "")
+            if url and url != last_url:
+                last_url = url
+                GLib.idle_add(window.update_page_visibility, url)
+            last_error = None
+        except Exception as err:  # Keep the last known visibility during CDP restarts.
+            message = str(err)
+            if message != last_error:
+                print(f"[overlay] CDP page check failed: {message}", flush=True)
+                last_error = message
+        threading.Event().wait(URL_POLL_SECONDS)
+
+
 window = Overlay()
 window.show_all()
+# Never cover DeskOS while Chromium/CDP is still starting.  The monitor will
+# show this same popup as soon as it observes Home Assistant (or another page).
+window.hide()
+threading.Thread(target=monitor_page_visibility, args=(window,), daemon=True).start()
 Gtk.main()
