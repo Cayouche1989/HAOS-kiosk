@@ -367,7 +367,6 @@ from collections.abc import Hashable
 from datetime import datetime
 from functools import wraps
 from typing import Any, cast, Callable, ClassVar, Final, Iterator, NotRequired, Protocol, Self, Sequence, Type, TypeAlias, TypedDict, TypeVar
-from target_url import is_valid_url, resolve_default_launch_url
 from Xlib import display                  #type: ignore[import-untyped] #pylint: disable=import-error
 from Xlib.xobject.drawable import Window  #type: ignore[import-untyped] #pylint: disable=import-error
 #-------------------------------------------------------------------------------
@@ -380,7 +379,7 @@ __copyright__ = "Copyright 2025 Jeff Kosowsky"
 XINPUT_RESTART_DELAY: int     = 5    # Seconds before restarting xinput after crash
 CMD_TIMEOUT: int | None       = 30   # Seconds before spawned action command timesout or None if no timeout
 GESTURE_CMDS_FILES: list[str] = ["/data/options.json", "gesture_commands.json"]
-DEFAULT_LAUNCH_URL = resolve_default_launch_url()
+DEFAULT_LAUNCH_URL = f"{(os.getenv('HA_URL') or 'about:blank').rstrip('/')}/{os.getenv('HA_DASHBOARD') or ''}".strip('/')
 
 #-------------------------------------------------------------------------------
 ## Initialization
@@ -511,6 +510,20 @@ SAFE_REDIRECT_REGEX: Final[re.Pattern[str]] = re.compile(
 SEPARATORS: frozenset[str] = frozenset({ "&&", "||", ";", "|", "&", "$(", "${", "`", "(", "{", "[[", "((" })
 SEP_REGEX: Final[re.Pattern[str]] = re.compile('(?:' + '|'.join(re.escape(op) for op in sorted(SEPARATORS, key=len, reverse=True)) + ')')
 
+VALID_URL_REGEX: Final[re.Pattern[str]] = re.compile(
+    r'^(https?://)?'                  # Optional scheme
+    r'(?:(?:[A-Z0-9](?:[A-Z0-9-]{0,61}[A-Z0-9])?\.)+[A-Z]{2,6}\.?|'  # Domain
+    r'localhost|'                     # localhost
+    r'\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})'  # IPv4
+    r'(?::\d{1,5})?'                  # Optional port (1-65535 max, but \d+ is fine)
+    r'(?:/?|[/?][^\s]*)?$',           # Path/query/fragment (allows #fragment, rejects spaces)
+    re.IGNORECASE
+)
+
+def is_valid_url(url: str) -> bool:
+    """Validate URL format (allows http://, https://, bare domain/IP, path, query, fragment)."""
+    return bool(url == 'about:blank' or VALID_URL_REGEX.fullmatch(url.strip()))
+
 #-------------------------------------------------------------------------------
 #### Globals
 GESTURE_SEP = "_"
@@ -639,7 +652,7 @@ def handle_refresh_browser(timeout: int | None = None, *, _cmd_name: str = "unkn
 
 @register_function("launch_url", optional=["url"])
 def handle_launch_url(url: str = DEFAULT_LAUNCH_URL, timeout: int | None = None, *, _cmd_name: str = "unknown") -> None:
-    """Launch a valid URL, defaulting to the resolved HA_TARGET_URL or about:blank."""
+    """Launch (valid) URL if given otherwise HA_URL/HA_DASHBOARD if exists otherwise 'about:blank'"""
     if not isinstance(url, str):
         raise ValueError(f"{_cmd_name}: URL must be str, got {type(url).__name__}")
     if not url.strip():
@@ -1916,7 +1929,7 @@ class GestureCommand:
 
             prior_match = gesture_cmd.append_gesture_command_list(add_overridden)
             if prior_match is not None:
-                debug(1, f"WARNING: Gesture masked by earlier entry ({'loading anyway' if add_overridden else 'dropped'}): {gesture_cmd.sprint_gesture()} < {prior_match.sprint_gesture()}")
+                debug(1, f"WARNING: Gesture masked by earlier entry ({"loading anyway" if add_overridden else "dropped"}): {gesture_cmd.sprint_gesture()} < {prior_match.sprint_gesture()}")
             if prior_match is None or add_overridden:
                 debug(4, f"Loaded command for gesture: {gesture_cmd}")
                 return True
@@ -2686,7 +2699,7 @@ def _run_subprocess(args: str | Sequence[str], *, shell: bool | None = None, tim
         return result
 
     except subprocess.TimeoutExpired as e:
-        raise CommandError(f"Timeout for '{prog}' after {timeout}s [{'shell' if use_shell else 'exec'}]: {description}") from e
+        raise CommandError(f"Timeout for '{prog}' after {timeout}s [{"shell" if use_shell else "exec"}]: {description}") from e
     except FileNotFoundError as e:
         if use_shell:  # This usually means: binary not found OR syntax error in shell string
             raise CommandError(f"Program '{prog}' not found or shell syntax error: {description}") from e
@@ -2694,7 +2707,7 @@ def _run_subprocess(args: str | Sequence[str], *, shell: bool | None = None, tim
     except PermissionError as e:
         raise CommandError(f"Permission denied for '{prog}': {description}") from e
     except Exception as e:
-        raise CommandError(f"Failed to execute '{prog}' command [{'shell' if use_shell else 'exec'}]: {description}") from e
+        raise CommandError(f"Failed to execute '{prog}' command [{"shell" if use_shell else "exec"}]: {description}") from e
 
     return subprocess.CompletedProcess[str](args=args, returncode=1, stdout="", stderr=str(e),)
 

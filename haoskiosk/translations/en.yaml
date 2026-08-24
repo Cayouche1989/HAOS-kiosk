@@ -2,22 +2,22 @@
 configuration:
   ha_username:
     name: "HA Username"
-    description: "Home Assistant login user name for optional auto-login [Default: \"\"]"
+    description: "Home Assistant login user name [Required]"
   ha_password:
     name: "HA Password"
-    description: "Home Assistant login password for optional auto-login [Default: \"\"]"
+    description: "Home Assistant login password [Required]"
   ha_url:
     name: "HA URL"
     description: |
       Base URL for HA [Default: http://localhost:8123]
       Note: Typically should not need to be changed since browser runs on the
       'localhost' server
+  ha_login_url:
+    name: "HA auto-login URL"
+    description: "HA base URL used for auto-login when it differs from the kiosk startup URL."
   ha_dashboard:
     name: "HA Dashboard"
-    description: |
-      Dashboard path (following "HA URL"), a host-like target such as
-      `localhost:48123/scene/`, or a full absolute target URL.
-      [Default: ""]
+    description: 'Dashboard path (following "HA URL") [Default: ""]'
   login_delay:
     name: "Login Delay"
     description: |
@@ -29,8 +29,8 @@ configuration:
   browser_refresh:
     name: "Browser Refresh"
     description: |
-      Browser refresh interval in seconds; 0 for never [Default: 0]
-      Note: Keep at 0 unless you explicitly need periodic recovery
+      Browser refresh interval in seconds; 0 for never [Default: 600]
+      Note: Recommended since on RPi, console messages can overwrite browser
   browser_engine:
     name: "Browser Engine"
     description: |
@@ -121,7 +121,7 @@ configuration:
     name: "REST Port"
     description: |
       Listening port for REST API server (1024-49151) [Default: 8080]
-  rest_bearer_token:
+  rest_authorization_token:
     name: "REST Authorization Token"
     description: |
       Optional authorization token for REST API. [Default: ""]
@@ -137,6 +137,12 @@ configuration:
     description: |
       Regex of runnable user commands for the REST API and for use in
       gesture commands. See README for details
+  touch_debug_level:
+    name: "Touch Debug Level"
+    description: |
+      Debug verbosity for mouse/touch gesture parsing. Use 1 for normal logs,
+      2-3 to inspect real tap/swipe/pinch handling, and higher values only for
+      deep parser debugging. [Default: 1]
   vnc_server:
     name: "VNC Server Password"
     description: |
@@ -145,5 +151,5 @@ configuration:
   debug_mode:
     name: "Debug Mode"
     description: |
-      Launch X and Openbox but not the kiosk browser. [Default: False]
+      Launch X and Openbox but not Luakit browser. [Default: False]
       Manually access using: sudo docker -exec -it addon_haoskiosk bash
