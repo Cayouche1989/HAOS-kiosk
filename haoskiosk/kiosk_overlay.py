@@ -19,6 +19,9 @@ ONBOARD_PATH = "/org/onboard/Onboard/Keyboard"
 ONBOARD_INTERFACE = "org.onboard.Onboard.Keyboard"
 DESKOS_URL = os.getenv("DESKOS_URL", "http://127.0.0.1:4173/")
 URL_POLL_SECONDS = 0.75
+OVERLAY_WIDTH = 326
+OVERLAY_HEIGHT = 64
+OVERLAY_MARGIN = 10
 
 
 def onboard_visible() -> bool:
@@ -57,8 +60,11 @@ class Overlay(Gtk.Window):
         self._visible_for_page = None
         self.connect("realize", self._on_realize)
         self.connect("map-event", self._on_map)
-        self.set_size_request(326, 64)
-        self.move(10, 10)
+        self.set_size_request(OVERLAY_WIDTH, OVERLAY_HEIGHT)
+        # Home Assistant's navigation toggle lives at the top left.  Keep the
+        # escape controls on the opposite side of the 1024x600 kiosk instead
+        # of competing with the native HA controls.
+        self.move(self._right_aligned_x(), OVERLAY_MARGIN)
         box = Gtk.Box(spacing=6, margin=6)
         self.add(box)
         for label, action in (("← DeskOS", self.deskos), ("⌨ Clavier", self.keyboard)):
@@ -67,6 +73,12 @@ class Overlay(Gtk.Window):
             button.connect("clicked", action)
             box.pack_start(button, True, True, 0)
         print("[overlay] overlay created", flush=True)
+
+    def _right_aligned_x(self) -> int:
+        """Place the fixed-size overlay inside the active X11 screen."""
+        screen = self.get_screen()
+        width = screen.get_width() if screen is not None else 1024
+        return max(OVERLAY_MARGIN, width - OVERLAY_WIDTH - OVERLAY_MARGIN)
 
     @staticmethod
     def _is_deskos_url(url: str) -> bool:
